@@ -1,6 +1,5 @@
-import { ListObjectsV2Command, S3Client, _Object } from '@aws-sdk/client-s3';
-// import { FileEntry, SFTPStream } from 'ssh2-streams';
-import { PassThrough } from 'stream';
+import { GetObjectCommand, ListObjectsV2Command, S3Client, _Object } from '@aws-sdk/client-s3';
+import { PassThrough, Readable } from 'stream';
 import { posix } from 'path';
 const { join, normalize, basename } = posix;
 import { ClientKey } from '.';
@@ -15,10 +14,11 @@ type OpenFile = {
   flags: number;
   fileName: string;
   fullPath: string;
-  size: number;
-  stream: PassThrough;
+  size?: number;
+  stream?: PassThrough;
   reqid?: number;
   fnum?: number;
+  read?: boolean;
 };
 type CustomS3Object = _Object & {
   IsDir?: boolean;
@@ -55,8 +55,8 @@ export default class SFTPSession {
     this.OpenFiles = new Map();
     this.OpenDirs = new Map();
 
-    // this.SFTPStream.on('OPEN', this.onOPEN);
-    // this.SFTPStream.on('READ', this.onREAD);
+    this.SFTPStream.on('OPEN', (reqid, filename, flags) => this.onOPEN(reqid, filename, flags));
+    this.SFTPStream.on('READ', (reqid, handle, offset, length) => this.onREAD(reqid, handle, offset, length));
     // this.SFTPStream.on('WRITE', this.onWRITE);
     this.SFTPStream.on('OPENDIR', (reqid, path) => this.onOPENDIR(reqid, path));
     this.SFTPStream.on('READDIR', (reqid, handle) => this.onREADDIR(reqid, handle));
@@ -69,12 +69,94 @@ export default class SFTPSession {
     this.SFTPStream.on('STAT', (reqid, path) => this.onSTAT(reqid, path, 'STAT'));
     this.SFTPStream.on('LSTAT', (reqid, path) => this.onSTAT(reqid, path, 'LSTAT'));
   }
-  // protected onOPEN(reqid: number, filename: string, flags: number) {
-  //   this.debug('OPEN', null, { filename, flags, handleCount: this.HandleCount });
-  // }
-  // protected onREAD(reqid: number, handle: Buffer, offset: number, length: number) {
-  //   this.debug('READ');
-  // }
+  protected async openRead(reqid: number, filename: string, flags: number, fullPath: string) {
+    try {
+      const data = await this.s3ListObjects(fullPath);
+      
+      const foundFile = data.Contents?.find((c) => c.Key === fullPath);
+      if (!foundFile) {
+        this.debug('OPEN', `no object found with key ${fullPath}`);
+        return this.SFTPStream.status(reqid, STATUS_CODE.NO_SUCH_FILE);  
+      }
+
+      const handle = Buffer.alloc(4);
+      this.debug('OPEN', 'issuing handle', { handle: this.HandleCount });
+      this.OpenFiles.set(this.HandleCount, {
+        flags: flags,
+        fileName: filename,
+        size: foundFile.Size,
+        fullPath: fullPath
+      });
+      handle.writeUInt32BE(this.HandleCount++, 0);
+      return this.SFTPStream.handle(reqid, handle);
+    } catch(err) {
+      this.error('OPEN', err, 'error listing objects');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+  }
+  protected async onOPEN(reqid: number, filename: string, flags: number) {
+    this.debug('OPEN', null, { filename, flags, handleCount: this.HandleCount });
+    if(filename.endsWith('\\') || filename.endsWith('/')) {
+      filename = filename.substring(0, filename.length - 1);
+    }
+    const fullPath = this.getFullPath(filename);
+
+    if (flags & OPEN_MODE.READ) {
+      return await this.openRead(reqid, filename, flags, fullPath);
+    } else if (flags & OPEN_MODE.WRITE) {
+      // TODO
+    } else {
+      this.debug('OPEN', 'Unsupported operation');
+      return this.SFTPStream.status(reqid, STATUS_CODE.OP_UNSUPPORTED);
+    }
+  }
+  protected async onREAD(reqid: number, handle: Buffer, offset: number, length: number) {
+    if (handle.length !== 4) {
+      this.debug('READ', 'wrong handle length');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+
+    const handleId = handle.readUInt32BE(0);
+    this.debug('READ', null, { handleId, offset, length });
+
+    const state = this.OpenFiles.get(handleId);
+    if (!state || !(state.flags & OPEN_MODE.READ)) {
+      this.debug('READ', 'invalid flags');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+
+    if (state.read) {
+      this.debug('READ', 'EOF');
+      return this.SFTPStream.status(reqid, STATUS_CODE.EOF);
+    }
+
+    if (offset + length > state.size) {
+      length = state.size - offset;
+    }
+
+    if (offset >= state.size || length === 0) {
+      this.debug('READ', 'Invalid offset');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+
+    if (offset + length >= state.size) {
+      state.read = true;
+    }
+
+    try {
+      const range = `bytes=${offset}-${offset + length - 1}`;
+      const data = await this.s3GetObject(state.fullPath, range);
+      if (data.length === 0) {
+        this.error('READ', null, 'found object is empty');
+        return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);  
+      }
+      this.debug('READ', 'successfully read file');
+      return this.SFTPStream.data(reqid, data);
+    } catch(err) {
+      this.error('READ', err, 'error getting object');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+  }
   // protected onWRITE(reqid: number, handle: Buffer, offset: number, data: Buffer) {
   //   this.debug('WRITE');
   // }
@@ -348,6 +430,21 @@ export default class SFTPSession {
   protected s3ListObjects(prefix: string) {
     const command = new ListObjectsV2Command({ Bucket: this.S3Bucket, Prefix: prefix });
     return this.S3Client.send(command);
+  }
+  protected async s3GetObject(key: string, range: string) {
+    const command = new GetObjectCommand({
+      Bucket: this.S3Bucket,
+      Key: key,
+      Range: range
+    });
+    const data = await this.S3Client.send(command);
+    const stream = data.Body as Readable;
+    return await new Promise<Buffer>((resolve, reject) => {
+      const chunks = [];
+      stream.on('data', (chunk) => chunks.push(chunk));
+      stream.on('error', reject);
+      stream.on('end', () => resolve(Buffer.concat(chunks)));
+    });
   }
   protected getFullPath(filename: string) {
     const fullPath = join(this.ClientKey.path, normalize(filename));

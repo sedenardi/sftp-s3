@@ -8,12 +8,12 @@ S3-backed SFTP server.
 - exit
 - ls
 - cd
+- get
 
 TODO
 - commands
   - put
   - rm
-  - get
   - rename
   - rmdir
   - mkdir
