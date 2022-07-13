@@ -7,11 +7,16 @@ S3-backed SFTP server.
 - connect
 - exit
 - ls
+- cd
 
 TODO
-- cd
-  - TODO - cd /
-  - TODO - cd ..
+- commands
+  - put
+  - rm
+  - get
+  - rename
+  - rmdir
+  - mkdir
 - abstract attrs `mode`
 - cleanup log levels
 

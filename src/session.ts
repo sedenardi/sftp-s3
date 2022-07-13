@@ -190,18 +190,23 @@ export default class SFTPSession {
     if (requestedPath === '.') {
       requestedPath = '/';
     }
-    const fullPath = this.getFullPath(requestedPath);
     let normalizedPath = normalize(requestedPath);
     if (!normalizedPath.startsWith('/')) {
       normalizedPath = '/' + normalizedPath;
     }
+    const fullPath = this.getFullPath(requestedPath);
     this.debug('REALPATH', 'listing objects', { fullPath, normalizedPath });
 
     try {
       const data = await this.s3ListObjects(fullPath);
       this.debug('REALPATH', `${data.Contents?.length || 0} objects found`);
       
-      let realObj = data.Contents?.find((c) => c.Key === fullPath || c.Key === (fullPath + '/.dir')) as CustomS3Object;
+      let realObj = data.Contents?.find((c) => {
+        return (
+          c.Key === fullPath ||
+          c.Key === (fullPath + '/.dir')
+        );
+      }) as CustomS3Object;
       
       if (realObj?.Key.endsWith('.dir')) {
         this.debug('REALPATH', `${realObj.Key} is a directory`);
@@ -225,7 +230,7 @@ export default class SFTPSession {
       return this.SFTPStream.name(reqid, [{
         filename: normalizedPath,
         longname: this.getLongname(realObj, normalizedPath),
-        attrs: null // might be an issue
+        attrs: null // TODO: may need to set to directory attrs
       }]);
     } catch(err) {
       this.error('REALPATH', err, 'error listing objects');
@@ -283,7 +288,7 @@ export default class SFTPSession {
       this.debug(event, 'listing objects', { fullPath });
       const data = await this.s3ListObjects(fullPath);
 
-      const exactMatch = data.Contents.find((c) => c.Key === fullPath);
+      const exactMatch = data.Contents?.find((c) => c.Key === fullPath);
       if (exactMatch) {
         this.debug(event, 'Retrieved file attrs');
         let mode = constants.S_IFREG;   // regular file
@@ -300,21 +305,22 @@ export default class SFTPSession {
         });
       }
 
-      const directoryMatch = data.Contents.find((c) => c.Key === (fullPath + '/.dir'));
-      if(directoryMatch) {
+      const directoryMatch = data.Contents?.find((c) => c.Key === (fullPath + '/.dir'));
+      const isRoot = path === '/';
+      if (directoryMatch || isRoot) {
         let mode = constants.S_IFDIR;   // directory
         mode |= constants.S_IRWXU;      // read, write, execute for user
         mode |= constants.S_IRWXG;      // read, write, execute for group
         mode |= constants.S_IRWXO;      // read, write, execute for other
 
-        this.debug(event, 'Retrieved file attrs');
+        this.debug(event, 'Retrieved directory attrs');
         return this.SFTPStream.attrs(reqid, {
           mode: mode,
           uid: 0,
           gid: 0,
           size: 1,
-          atime: directoryMatch.LastModified.valueOf(),
-          mtime: directoryMatch.LastModified.valueOf()
+          atime: isRoot ? Date.now() : directoryMatch.LastModified.valueOf(),
+          mtime: isRoot ? Date.now() : directoryMatch.LastModified.valueOf()
         });
       }
 
