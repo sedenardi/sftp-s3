@@ -5,10 +5,11 @@ import { posix } from 'path';
 const { join, normalize, basename } = posix;
 import { ClientKey } from '.';
 import Logger, { LogArgs, LogFunction } from './logger';
-import { OPEN_MODE, STATUS_CODE } from 'ssh2/lib/protocol/SFTP';
 import moment from 'moment';
 import constants from 'constants';
-import { FileEntry, SFTPWrapper } from 'ssh2';
+import { FileEntry, SFTPWrapper, utils } from 'ssh2';
+
+const { OPEN_MODE, STATUS_CODE } = utils.sftp;
 
 type OpenFile = {
   flags: number;
@@ -65,8 +66,8 @@ export default class SFTPSession {
     // this.SFTPStream.on('RMDIR', this.onRMDIR);
     // this.SFTPStream.on('MKDIR', this.onMKDIR);
     // this.SFTPStream.on('RENAME', this.onRENAME);
-    // this.SFTPStream.on('STAT', (reqid, path) => this.onSTAT(reqid, path, 'STAT'));
-    // this.SFTPStream.on('LSTAT', (reqid, path) => this.onSTAT(reqid, path, 'LSTAT'));
+    this.SFTPStream.on('STAT', (reqid, path) => this.onSTAT(reqid, path, 'STAT'));
+    this.SFTPStream.on('LSTAT', (reqid, path) => this.onSTAT(reqid, path, 'LSTAT'));
   }
   // protected onOPEN(reqid: number, filename: string, flags: number) {
   //   this.debug('OPEN', null, { filename, flags, handleCount: this.HandleCount });
@@ -275,9 +276,55 @@ export default class SFTPSession {
   // protected onRENAME(reqid: number, oldPath: string, newPath: string) {
   //   this.debug('RENAME');
   // }
-  // protected onSTAT(reqid: number, path: string, event: 'STAT' | 'LSTAT') {
-  //   this.debug(event);
-  // }
+  protected async onSTAT(reqid: number, path: string, event: 'STAT' | 'LSTAT') {
+    this.debug(event, null, { path });
+    const fullPath = this.getFullPath(path);
+    try {
+      this.debug(event, 'listing objects', { fullPath });
+      const data = await this.s3ListObjects(fullPath);
+
+      const exactMatch = data.Contents.find((c) => c.Key === fullPath);
+      if (exactMatch) {
+        this.debug(event, 'Retrieved file attrs');
+        let mode = constants.S_IFREG;   // regular file
+        mode |= constants.S_IRWXU;      // read, write, execute for user
+        mode |= constants.S_IRWXG;      // read, write, execute for group
+        mode |= constants.S_IRWXO;      // read, write, execute for other
+        return this.SFTPStream.attrs(reqid, {
+          mode: mode,
+          uid: 0,
+          gid: 0,
+          size: exactMatch.Size,
+          atime: exactMatch.LastModified.valueOf(),
+          mtime: exactMatch.LastModified.valueOf()
+        });
+      }
+
+      const directoryMatch = data.Contents.find((c) => c.Key === (fullPath + '/.dir'));
+      if(directoryMatch) {
+        let mode = constants.S_IFDIR;   // directory
+        mode |= constants.S_IRWXU;      // read, write, execute for user
+        mode |= constants.S_IRWXG;      // read, write, execute for group
+        mode |= constants.S_IRWXO;      // read, write, execute for other
+
+        this.debug(event, 'Retrieved file attrs');
+        return this.SFTPStream.attrs(reqid, {
+          mode: mode,
+          uid: 0,
+          gid: 0,
+          size: 1,
+          atime: directoryMatch.LastModified.valueOf(),
+          mtime: directoryMatch.LastModified.valueOf()
+        });
+      }
+
+      this.debug(event, 'Key not found');
+      return this.SFTPStream.status(reqid, STATUS_CODE.NO_SUCH_FILE);
+    } catch(err) {
+      this.error(event, err, 'error listing objects');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+  }
   protected getLongname(object: CustomS3Object, normalizedPath: string) {
     const momentObj = moment(object.LastModified);
     const nameParts = [
@@ -297,7 +344,8 @@ export default class SFTPSession {
     return this.S3Client.send(command);
   }
   protected getFullPath(filename: string) {
-    return join(this.ClientKey.path, normalize(filename));
+    const fullPath = join(this.ClientKey.path, normalize(filename));
+    return fullPath;
   }
   protected getLogMsg(event: string, msg?: string) {
     let logStr = event;

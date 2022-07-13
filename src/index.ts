@@ -123,6 +123,9 @@ export default class SFTPServer {
   }
   public listen(port: number, hostname: string, cb?: () => void) {
     this.SSHServer = new Server({
+      // debug: (message) => {
+      //   this.Logger.info({ msg: message });
+      // },
       hostKeys: this.HostKeys
     }, (client) => this.connectionListener(client));
 
