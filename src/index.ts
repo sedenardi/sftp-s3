@@ -1,8 +1,7 @@
-import { S3 } from '@aws-sdk/client-s3';
-import { AuthContext, Connection, Server, ServerConfig, utils } from 'ssh2';
+import { S3Client } from '@aws-sdk/client-s3';
+import { AuthContext, Connection, ParsedKey, Server, ServerConfig, utils } from 'ssh2';
 import { posix } from 'path';
 const { join, normalize } = posix;
-import { ParsedKey } from 'ssh2-streams';
 import { timingSafeEqual } from 'crypto';
 import Logger, { LogFunction } from './logger';
 import SFTPSession from './session';
@@ -14,7 +13,7 @@ export type ClientKey = {
 };
 type HostKeys = ServerConfig['hostKeys'];
 export default class SFTPServer {
-  protected S3Client: S3;
+  protected S3Client: S3Client;
   protected S3Bucket: string;
   protected HostKeys: HostKeys;
   protected LogFunction: LogFunction;
@@ -23,7 +22,7 @@ export default class SFTPServer {
   protected ClientKeys: ClientKey[];
   protected SSHServer: Server;
   constructor(opts: {
-    S3Client: S3,
+    S3Client: S3Client,
     S3Bucket: string,
     HostKeys: HostKeys,
     LogFunction?: LogFunction
@@ -37,7 +36,10 @@ export default class SFTPServer {
     this.ClientKeys = [];
   }
   public addClientKey(username: string, key: string | Buffer, namespace?: string) {
-    const pubKey = utils.parseKey(key) as ParsedKey;
+    const pubKey = utils.parseKey(key);
+    if (pubKey instanceof Error) {
+      throw pubKey;
+    }
     
     let path = normalize(username);
     if (namespace) {
@@ -106,6 +108,12 @@ export default class SFTPServer {
             ClientKey: clientKey,
             LogFunction: this.LogFunction
           });
+        }).on('close', () => {
+          this.Logger.info({ username: clientKey.username, msg: 'Session closed' });
+          client.end();
+        }).on('end', () => {
+          this.Logger.info({ username: clientKey.username, msg: 'Session ended' });
+          client.end();
         });
       });
     });

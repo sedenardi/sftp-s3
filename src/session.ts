@@ -1,5 +1,5 @@
-import { ListObjectsV2Command, S3, _Object } from '@aws-sdk/client-s3';
-import { FileEntry, SFTPStream } from 'ssh2-streams';
+import { ListObjectsV2Command, S3Client, _Object } from '@aws-sdk/client-s3';
+// import { FileEntry, SFTPStream } from 'ssh2-streams';
 import { PassThrough } from 'stream';
 import { posix } from 'path';
 const { join, normalize, basename } = posix;
@@ -8,6 +8,7 @@ import Logger, { LogArgs, LogFunction } from './logger';
 import { OPEN_MODE, STATUS_CODE } from 'ssh2/lib/protocol/SFTP';
 import moment from 'moment';
 import constants from 'constants';
+import { FileEntry, SFTPWrapper } from 'ssh2';
 
 type OpenFile = {
   flags: number;
@@ -27,9 +28,9 @@ type OpenDir = {
   read?: boolean;
 };
 export default class SFTPSession {
-  protected S3Client: S3;
+  protected S3Client: S3Client;
   protected S3Bucket: string;
-  protected SFTPStream: SFTPStream;
+  protected SFTPStream: SFTPWrapper;
   protected ClientKey: ClientKey;
   protected Logger: Logger;
 
@@ -37,9 +38,9 @@ export default class SFTPSession {
   protected OpenFiles: Map<number, OpenFile>;
   protected OpenDirs: Map<number, OpenDir>;
   constructor(opts: {
-    S3Client: S3,
+    S3Client: S3Client,
     S3Bucket: string,
-    SFTPStream: SFTPStream,
+    SFTPStream: SFTPWrapper,
     ClientKey: ClientKey,
     LogFunction?: LogFunction
   }) {
