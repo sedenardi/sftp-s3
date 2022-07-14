@@ -3,7 +3,7 @@ import { PassThrough, Readable } from 'stream';
 import { posix } from 'path';
 const { join, normalize, basename } = posix;
 import { ClientKey } from '.';
-import Logger, { LogArgs, LogFunction } from './logger';
+import Logger, { Callbacks, LogArgs, LogFunction } from './logger';
 import moment from 'moment';
 import constants from 'constants';
 import { FileEntry, SFTPWrapper, utils } from 'ssh2';
@@ -44,13 +44,14 @@ export default class SFTPSession {
     S3Bucket: string,
     SFTPStream: SFTPWrapper,
     ClientKey: ClientKey,
-    LogFunction?: LogFunction
+    LogFunction?: LogFunction,
+    Callbacks?: Callbacks
   }) {
     this.S3Client = opts.S3Client;
     this.S3Bucket = opts.S3Bucket;
     this.SFTPStream = opts.SFTPStream;
     this.ClientKey = opts.ClientKey;
-    this.Logger = new Logger(opts.LogFunction, opts.ClientKey.username);
+    this.Logger = new Logger(opts.LogFunction, opts.Callbacks, opts.ClientKey.username);
 
     this.HandleCount = 0;
     this.OpenFiles = new Map();
@@ -91,7 +92,7 @@ export default class SFTPSession {
       handle.writeUInt32BE(this.HandleCount++, 0);
       return this.SFTPStream.handle(reqid, handle);
     } catch(err) {
-      this.error('OPEN', err, 'error listing objects');
+      this.error('OPEN', err, 'error listing objects', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
@@ -113,12 +114,13 @@ export default class SFTPSession {
 
       this.debug('OPEN', 'starting upload');
       await this.s3UploadObject(fullPath, stream);
-      this.debug('OPEN', 'finished upload');
+      this.info('OPEN', 'finished upload');
+      this.Logger.onPut({ path: fullPath });
       this.OpenFiles.delete(state.fnum);
       
       return this.SFTPStream.status(state.reqid, STATUS_CODE.OK);
     } catch(err) {
-      this.error('OPEN', err, 'error uploading object');
+      this.error('OPEN', err, 'error uploading object', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
@@ -175,19 +177,19 @@ export default class SFTPSession {
       const range = `bytes=${offset}-${offset + length - 1}`;
       const data = await this.s3GetObject(state.fullPath, range);
       if (data.length === 0) {
-        this.error('READ', null, 'found object is empty');
+        this.error('READ', null, 'found object is empty', { fullPath: state.fullPath });
         return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);  
       }
       this.debug('READ', 'successfully read file');
       return this.SFTPStream.data(reqid, data);
     } catch(err) {
-      this.error('READ', err, 'error getting object');
+      this.error('READ', err, 'error getting object', { fullPath: state.fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
   protected onWRITE(reqid: number, handle: Buffer, offset: number, data: Buffer) {
     if (handle.length !== 4) {
-      this.debug('WRITE', 'wrong handle length');
+      this.error('WRITE', null, 'wrong handle length');
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
 
@@ -196,14 +198,14 @@ export default class SFTPSession {
 
     const state = this.OpenFiles.get(handleId);
     if (!state || !(state.flags & OPEN_MODE.WRITE)) {
-      this.debug('WRITE', 'invalid flags');
+      this.error('WRITE', null, 'invalid flags');
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
 
     const writeData = Buffer.from(data);
     state.stream.write(writeData, (err) => {
       if (err) {
-        this.error('WRITE', err, 'Error writing to stream');
+        this.error('WRITE', err, 'Error writing to stream', { fullPath: state.fullPath });
         return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
       }
       this.debug('WRITE', `Wrote ${writeData.length} bytes to stream`);
@@ -215,7 +217,7 @@ export default class SFTPSession {
     const fullPath = this.getFullPath(path);
     const isRoot = path === '/';
     let searchPath = fullPath;
-    if (!isRoot) {
+    if (!isRoot && !searchPath.endsWith('/')) {
       searchPath = searchPath + '/';
     }
     try {
@@ -260,13 +262,13 @@ export default class SFTPSession {
       handle.writeUInt32BE(this.HandleCount++, 0);
       return this.SFTPStream.handle(reqid, handle);
     } catch(err) {
-      this.error('OPENDIR', err, 'error listing objects');
+      this.error('OPENDIR', err, 'error listing objects', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
   protected onREADDIR(reqid: number, handle: Buffer) {
     if (handle.length !== 4) {
-      this.info('READDIR', 'invalid handle length');
+      this.error('READDIR', null, 'invalid handle length');
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
 
@@ -275,7 +277,7 @@ export default class SFTPSession {
     
     const dirState = this.OpenDirs.get(handleId);
     if (!dirState) {
-      this.info('READDIR', 'unknown handle', { handle: handleId });
+      this.error('READDIR', null, 'unknown handle', { handle: handleId });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
     if (dirState.read) {
@@ -293,18 +295,8 @@ export default class SFTPSession {
         fileName = fileName.substring(0, fileName.length - 1);
       }
 
-      let mode = 0;
-      mode |= constants.S_IRWXU; // read, write, execute for user
-      mode |= constants.S_IRWXG; // read, write, execute for group
-      mode |= constants.S_IRWXO; // read, write, execute for other
-      if (l.IsDir) {
-        mode |= constants.S_IFDIR;
-      } else {
-        mode |= constants.S_IFREG;
-      }
-
       const attrs = {
-        mode: mode,
+        mode: this.getStatsMode(l.IsDir ? 'dir' : 'file'),
         uid: 0,
         gid: 0,
         size: (l.IsDir ? 1 : l.Size),
@@ -369,13 +361,13 @@ export default class SFTPSession {
         attrs: null // TODO: may need to set to directory attrs
       }]);
     } catch(err) {
-      this.error('REALPATH', err, 'error listing objects');
+      this.error('REALPATH', err, 'error listing objects', { fullPath: normalizedPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
   protected onCLOSE(reqid: number, handle: Buffer) {
     if (handle.length !== 4) {
-      this.info('CLOSE', 'invalid handle length');
+      this.error('CLOSE', null, 'invalid handle length');
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
 
@@ -383,7 +375,7 @@ export default class SFTPSession {
     this.debug('CLOSE', null, { handle: handleId });
     
     if (!this.OpenFiles.has(handleId) && !this.OpenDirs.has(handleId)) {
-      this.info('CLOSE', 'unknown handle', { handle: handleId });
+      this.error('CLOSE', null, 'unknown handle', { handle: handleId });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
 
@@ -396,7 +388,8 @@ export default class SFTPSession {
         this.debug('CLOSE', 'stream closed', { handle: handleId });
         return;
       } else {
-        this.debug('CLOSE', 'file downloaded, removing file handle', { fileName: fileState.fileName });
+        this.info('CLOSE', 'file downloaded', { fileName: fileState.fileName });
+        this.Logger.onGet({ path: fileState.fileName });
         this.OpenFiles.delete(handleId);
       }
     } else {
@@ -412,10 +405,11 @@ export default class SFTPSession {
     try {
       this.debug('REMOVE', 'deleting object');
       await this.s3DeleteObject(fullPath);
-      this.debug('REMOVE', 'deleted object successfully');
+      this.info('REMOVE', 'deleted object successfully');
+      this.Logger.onRm({ path: fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.OK);
     } catch(err) {
-      this.error('REMOVE', err, 'error deleting objects');
+      this.error('REMOVE', err, 'error deleting objects', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
@@ -434,28 +428,29 @@ export default class SFTPSession {
       this.debug('RMDIR', `listed ${data.Contents?.length || 0} objects successfully`);
       contents = data.Contents || [];
     } catch(err) {
-      this.error('RMDIR', err, 'error listing objects');
+      this.error('RMDIR', err, 'error listing objects', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
 
     if (!contents.length) {
-      this.error('RMDIR', null, 'directory not found');
+      this.error('RMDIR', null, 'directory not found', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.NO_SUCH_FILE);
     }
 
     const dirNotEmpty = contents.some((c) => c.Key !== dirFilePath);
     if (dirNotEmpty) {
-      this.error('RMDIR', null, 'directory not empty');
+      this.error('RMDIR', null, 'directory not empty', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE, 'Directory not empty');
     }
 
     try {
       this.debug('RMDIR', 'deleting object');
       await this.s3DeleteObject(dirFilePath);
-      this.debug('RMDIR', 'deleted object successfully');
+      this.info('RMDIR', 'deleted object successfully');
+      this.Logger.onRmdir({ path: fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.OK);
     } catch(err) {
-      this.error('RMDIR', err, 'error deleting objects');
+      this.error('RMDIR', err, 'error deleting objects', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
@@ -471,10 +466,11 @@ export default class SFTPSession {
     try {
       this.debug('MKDIR', 'uploading object');
       await this.s3PutObject(fullPath, '', 0);
-      this.debug('MKDIR', 'uploaded object successfully');
+      this.info('MKDIR', 'uploaded object successfully');
+      this.Logger.onMkdir({ path: fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.OK);
     } catch(err) {
-      this.error('MKDIR', err, 'error uploading object');
+      this.error('MKDIR', err, 'error uploading object', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
@@ -485,7 +481,7 @@ export default class SFTPSession {
     const newFullPath = this.getFullPath(newPath);
 
     if (oldFullPath === newFullPath) {
-      this.error('RENAME', null, 'old and new paths match');
+      this.error('RENAME', null, 'old and new paths match', { oldFullPath, newFullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
 
@@ -494,17 +490,18 @@ export default class SFTPSession {
       await this.s3CopyObject(oldFullPath, newFullPath);
       this.debug('RENAME', 'copied object successfully');
     } catch(err) {
-      this.error('RENAME', err, 'error copying object');
+      this.error('RENAME', err, 'error copying object', { oldFullPath, newFullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.NO_SUCH_FILE);
     }
 
     try {
       this.debug('REMOVE', 'deleting object');
       await this.s3DeleteObject(oldFullPath);
-      this.debug('REMOVE', 'deleted object successfully');
+      this.info('REMOVE', 'renamed object successfully');
+      this.Logger.onRename({ oldPath, newPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.OK);
     } catch(err) {
-      this.error('RENAME', err, 'error deleting object');
+      this.error('RENAME', err, 'error deleting object', { oldFullPath, newFullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
@@ -518,12 +515,8 @@ export default class SFTPSession {
       const exactMatch = data.Contents?.find((c) => c.Key === fullPath);
       if (exactMatch) {
         this.debug(event, 'Retrieved file attrs');
-        let mode = constants.S_IFREG;   // regular file
-        mode |= constants.S_IRWXU;      // read, write, execute for user
-        mode |= constants.S_IRWXG;      // read, write, execute for group
-        mode |= constants.S_IRWXO;      // read, write, execute for other
         return this.SFTPStream.attrs(reqid, {
-          mode: mode,
+          mode: this.getStatsMode('file'),
           uid: 0,
           gid: 0,
           size: exactMatch.Size,
@@ -535,14 +528,9 @@ export default class SFTPSession {
       const directoryMatch = data.Contents?.find((c) => c.Key === (fullPath + '/.dir'));
       const isRoot = path === '/';
       if (directoryMatch || isRoot) {
-        let mode = constants.S_IFDIR;   // directory
-        mode |= constants.S_IRWXU;      // read, write, execute for user
-        mode |= constants.S_IRWXG;      // read, write, execute for group
-        mode |= constants.S_IRWXO;      // read, write, execute for other
-
         this.debug(event, 'Retrieved directory attrs');
         return this.SFTPStream.attrs(reqid, {
-          mode: mode,
+          mode: this.getStatsMode('dir'),
           uid: 0,
           gid: 0,
           size: 1,
@@ -554,7 +542,7 @@ export default class SFTPSession {
       this.debug(event, 'Key not found');
       return this.SFTPStream.status(reqid, STATUS_CODE.NO_SUCH_FILE);
     } catch(err) {
-      this.error(event, err, 'error listing objects');
+      this.error(event, err, 'error listing objects', { fullPath });
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
@@ -629,6 +617,18 @@ export default class SFTPSession {
   protected getFullPath(filename: string) {
     const fullPath = join(this.ClientKey.path, normalize(filename));
     return fullPath;
+  }
+  protected getStatsMode(type: 'file' | 'dir') {
+    let mode = 0;
+    mode |= constants.S_IRWXU; // read, write, execute for user
+    mode |= constants.S_IRWXG; // read, write, execute for group
+    mode |= constants.S_IRWXO; // read, write, execute for other
+    if (type === 'dir') {
+      mode |= constants.S_IFDIR; // directory
+    } else {
+      mode |= constants.S_IFREG; // regular file
+    }
+    return mode;
   }
   protected getLogMsg(event: string, msg?: string) {
     let logStr = event;

@@ -1,7 +1,6 @@
 # sftp-s3
 S3-backed SFTP server.
 
-
 ### Implemented SFTP Commands
 
 - connect
@@ -15,7 +14,7 @@ S3-backed SFTP server.
 - rm
 - rename
 
-TODO
-- abstract attrs `mode`
-- cleanup log levels
-  - add `.emit` -> `info` logs
+### TODO
+
+- BUG: rm nonexistent file doesn't error
+- add documentation
