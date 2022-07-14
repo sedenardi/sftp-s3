@@ -1,4 +1,4 @@
-import { DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, PutObjectCommandInput, S3Client, _Object } from '@aws-sdk/client-s3';
+import { CopyObjectCommand, DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, PutObjectCommandInput, S3Client, _Object } from '@aws-sdk/client-s3';
 import { PassThrough, Readable } from 'stream';
 import { posix } from 'path';
 const { join, normalize, basename } = posix;
@@ -63,10 +63,10 @@ export default class SFTPSession {
     this.SFTPStream.on('READDIR', (reqid, handle) => this.onREADDIR(reqid, handle));
     this.SFTPStream.on('REALPATH', (reqid, path) => this.onREALPATH(reqid, path));
     this.SFTPStream.on('CLOSE', (reqid, handle) => this.onCLOSE(reqid, handle));
-    // this.SFTPStream.on('REMOVE', this.onREMOVE);
+    this.SFTPStream.on('REMOVE', (reqid, path) => this.onREMOVE(reqid, path));
     this.SFTPStream.on('RMDIR', (reqid, path) => this.onRMDIR(reqid, path));
     this.SFTPStream.on('MKDIR', (reqid, path) => this.onMKDIR(reqid, path));
-    // this.SFTPStream.on('RENAME', this.onRENAME);
+    this.SFTPStream.on('RENAME', (reqid, oldPath, newPath) => this.onRENAME(reqid, oldPath, newPath));
     this.SFTPStream.on('STAT', (reqid, path) => this.onSTAT(reqid, path, 'STAT'));
     this.SFTPStream.on('LSTAT', (reqid, path) => this.onSTAT(reqid, path, 'LSTAT'));
   }
@@ -405,9 +405,20 @@ export default class SFTPSession {
     }
     return this.SFTPStream.status(reqid, STATUS_CODE.OK);
   }
-  // protected onREMOVE(reqid: number, path: string) {
-  //   this.debug('REMOVE');
-  // }
+  protected async onREMOVE(reqid: number, path: string) {
+    this.debug('REMOVE', null, { path });
+
+    const fullPath = this.getFullPath(path);
+    try {
+      this.debug('REMOVE', 'deleting object');
+      await this.s3DeleteObject(fullPath);
+      this.debug('REMOVE', 'deleted object successfully');
+      return this.SFTPStream.status(reqid, STATUS_CODE.OK);
+    } catch(err) {
+      this.error('REMOVE', err, 'error deleting objects');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+  }
   protected async onRMDIR(reqid: number, path: string) {
     this.debug('RMDIR', null, { path });
 
@@ -467,9 +478,36 @@ export default class SFTPSession {
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
-  // protected onRENAME(reqid: number, oldPath: string, newPath: string) {
-  //   this.debug('RENAME');
-  // }
+  protected async onRENAME(reqid: number, oldPath: string, newPath: string) {
+    this.debug('RENAME', null, { oldPath, newPath });
+
+    const oldFullPath = this.getFullPath(oldPath);
+    const newFullPath = this.getFullPath(newPath);
+
+    if (oldFullPath === newFullPath) {
+      this.error('RENAME', null, 'old and new paths match');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+
+    try {
+      this.debug('RENAME', 'copying object');
+      await this.s3CopyObject(oldFullPath, newFullPath);
+      this.debug('RENAME', 'copied object successfully');
+    } catch(err) {
+      this.error('RENAME', err, 'error copying object');
+      return this.SFTPStream.status(reqid, STATUS_CODE.NO_SUCH_FILE);
+    }
+
+    try {
+      this.debug('REMOVE', 'deleting object');
+      await this.s3DeleteObject(oldFullPath);
+      this.debug('REMOVE', 'deleted object successfully');
+      return this.SFTPStream.status(reqid, STATUS_CODE.OK);
+    } catch(err) {
+      this.error('RENAME', err, 'error deleting object');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+  }
   protected async onSTAT(reqid: number, path: string, event: 'STAT' | 'LSTAT') {
     this.debug(event, null, { path });
     const fullPath = this.getFullPath(path);
@@ -577,6 +615,14 @@ export default class SFTPSession {
     const command = new DeleteObjectCommand({
       Bucket: this.S3Bucket,
       Key: key
+    });
+    return this.S3Client.send(command);
+  }
+  protected s3CopyObject(oldKey: string, newKey: string) {
+    const command = new CopyObjectCommand({
+      Bucket: this.S3Bucket,
+      CopySource: join(this.S3Bucket, oldKey),
+      Key: newKey
     });
     return this.S3Client.send(command);
   }

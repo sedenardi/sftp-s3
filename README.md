@@ -12,11 +12,10 @@ S3-backed SFTP server.
 - put
 - mkdir
 - rmdir
+- rm
+- rename
 
 TODO
-- commands
-  - rm
-  - rename
 - abstract attrs `mode`
 - cleanup log levels
   - add `.emit` -> `info` logs
