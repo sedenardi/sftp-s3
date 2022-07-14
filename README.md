@@ -10,16 +10,13 @@ S3-backed SFTP server.
 - cd
 - get
 - put
+- mkdir
+- rmdir
 
 TODO
 - commands
   - rm
   - rename
-  - rmdir
-  - mkdir
 - abstract attrs `mode`
 - cleanup log levels
   - add `.emit` -> `info` logs
-
-BUG: RMDIR directory removes objects that start with dir name
-  - object: 'test1234.csv', dir: 'te'

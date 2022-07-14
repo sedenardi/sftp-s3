@@ -1,4 +1,4 @@
-import { GetObjectCommand, ListObjectsV2Command, S3Client, _Object } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, ListObjectsV2Command, PutObjectCommand, PutObjectCommandInput, S3Client, _Object } from '@aws-sdk/client-s3';
 import { PassThrough, Readable } from 'stream';
 import { posix } from 'path';
 const { join, normalize, basename } = posix;
@@ -64,8 +64,8 @@ export default class SFTPSession {
     this.SFTPStream.on('REALPATH', (reqid, path) => this.onREALPATH(reqid, path));
     this.SFTPStream.on('CLOSE', (reqid, handle) => this.onCLOSE(reqid, handle));
     // this.SFTPStream.on('REMOVE', this.onREMOVE);
-    // this.SFTPStream.on('RMDIR', this.onRMDIR);
-    // this.SFTPStream.on('MKDIR', this.onMKDIR);
+    this.SFTPStream.on('RMDIR', (reqid, path) => this.onRMDIR(reqid, path));
+    this.SFTPStream.on('MKDIR', (reqid, path) => this.onMKDIR(reqid, path));
     // this.SFTPStream.on('RENAME', this.onRENAME);
     this.SFTPStream.on('STAT', (reqid, path) => this.onSTAT(reqid, path, 'STAT'));
     this.SFTPStream.on('LSTAT', (reqid, path) => this.onSTAT(reqid, path, 'LSTAT'));
@@ -214,9 +214,13 @@ export default class SFTPSession {
     this.debug('OPENDIR', null, { path });
     const fullPath = this.getFullPath(path);
     const isRoot = path === '/';
+    let searchPath = fullPath;
+    if (!isRoot) {
+      searchPath = searchPath + '/';
+    }
     try {
       this.debug('OPENDIR', 'listing objects', { fullPath });
-      const data = await this.s3ListObjects(fullPath);
+      const data = await this.s3ListObjects(searchPath);
       this.debug('OPENDIR', `${data.Contents?.length || 0} objects found`);
 
       if (!data.Contents?.length && !isRoot) {
@@ -404,12 +408,65 @@ export default class SFTPSession {
   // protected onREMOVE(reqid: number, path: string) {
   //   this.debug('REMOVE');
   // }
-  // protected onRMDIR(reqid: number, path: string) {
-  //   this.debug('RMDIR');
-  // }
-  // protected onMKDIR(reqid: number, path: string) {
-  //   this.debug('MKDIR');
-  // }
+  protected async onRMDIR(reqid: number, path: string) {
+    this.debug('RMDIR', null, { path });
+
+    const fullPath = this.getFullPath(path);
+    const searchPath = fullPath + '/';
+    const dirFilePath = join(fullPath, '.dir');
+
+    let contents: _Object[];
+
+    try {
+      this.debug('RMDIR', 'listing objects');
+      const data = await this.s3ListObjects(searchPath);
+      this.debug('RMDIR', `listed ${data.Contents?.length || 0} objects successfully`);
+      contents = data.Contents || [];
+    } catch(err) {
+      this.error('RMDIR', err, 'error listing objects');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+
+    if (!contents.length) {
+      this.error('RMDIR', null, 'directory not found');
+      return this.SFTPStream.status(reqid, STATUS_CODE.NO_SUCH_FILE);
+    }
+
+    const dirNotEmpty = contents.some((c) => c.Key !== dirFilePath);
+    if (dirNotEmpty) {
+      this.error('RMDIR', null, 'directory not empty');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE, 'Directory not empty');
+    }
+
+    try {
+      this.debug('RMDIR', 'deleting object');
+      await this.s3DeleteObject(dirFilePath);
+      this.debug('RMDIR', 'deleted object successfully');
+      return this.SFTPStream.status(reqid, STATUS_CODE.OK);
+    } catch(err) {
+      this.error('RMDIR', err, 'error deleting objects');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+  }
+  protected async onMKDIR(reqid: number, path: string) {
+    this.debug('MKDIR', null, { path });
+
+    let dirFilePath = join(path, '.dir');
+    if (dirFilePath.endsWith('/')) {
+      dirFilePath = dirFilePath.slice(0, -1);
+    }
+    const fullPath = this.getFullPath(dirFilePath);
+
+    try {
+      this.debug('MKDIR', 'uploading object');
+      await this.s3PutObject(fullPath, '', 0);
+      this.debug('MKDIR', 'uploaded object successfully');
+      return this.SFTPStream.status(reqid, STATUS_CODE.OK);
+    } catch(err) {
+      this.error('MKDIR', err, 'error uploading object');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+  }
   // protected onRENAME(reqid: number, oldPath: string, newPath: string) {
   //   this.debug('RENAME');
   // }
@@ -506,6 +563,22 @@ export default class SFTPSession {
       },
     });
     return upload.done();
+  }
+  protected s3PutObject(key: string, body: PutObjectCommandInput['Body'], contentLength?: number) {
+    const command = new PutObjectCommand({
+      Bucket: this.S3Bucket,
+      Key: key,
+      Body: body,
+      ContentLength: contentLength
+    });
+    return this.S3Client.send(command);
+  }
+  protected s3DeleteObject(key: string) {
+    const command = new DeleteObjectCommand({
+      Bucket: this.S3Bucket,
+      Key: key
+    });
+    return this.S3Client.send(command);
   }
   protected getFullPath(filename: string) {
     const fullPath = join(this.ClientKey.path, normalize(filename));
