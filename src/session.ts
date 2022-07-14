@@ -7,6 +7,7 @@ import Logger, { LogArgs, LogFunction } from './logger';
 import moment from 'moment';
 import constants from 'constants';
 import { FileEntry, SFTPWrapper, utils } from 'ssh2';
+import { Upload } from '@aws-sdk/lib-storage';
 
 const { OPEN_MODE, STATUS_CODE } = utils.sftp;
 
@@ -57,7 +58,7 @@ export default class SFTPSession {
 
     this.SFTPStream.on('OPEN', (reqid, filename, flags) => this.onOPEN(reqid, filename, flags));
     this.SFTPStream.on('READ', (reqid, handle, offset, length) => this.onREAD(reqid, handle, offset, length));
-    // this.SFTPStream.on('WRITE', this.onWRITE);
+    this.SFTPStream.on('WRITE', (reqid, handle, offset, data) => this.onWRITE(reqid, handle, offset, data));
     this.SFTPStream.on('OPENDIR', (reqid, path) => this.onOPENDIR(reqid, path));
     this.SFTPStream.on('READDIR', (reqid, handle) => this.onREADDIR(reqid, handle));
     this.SFTPStream.on('REALPATH', (reqid, path) => this.onREALPATH(reqid, path));
@@ -94,6 +95,33 @@ export default class SFTPSession {
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
+  protected async openWrite(reqid: number, filename: string, flags: number, fullPath: string) {
+    try {
+      const handle = Buffer.alloc(4);
+      this.debug('OPEN', 'issuing handle', { handle: this.HandleCount });
+      
+      const stream = new PassThrough();
+      this.OpenFiles.set(this.HandleCount, {
+        flags: flags,
+        fileName: filename,
+        stream: stream,
+        fullPath: fullPath
+      });
+      const state = this.OpenFiles.get(this.HandleCount);
+      handle.writeUInt32BE(this.HandleCount++, 0);
+      this.SFTPStream.handle(reqid, handle);
+
+      this.debug('OPEN', 'starting upload');
+      await this.s3UploadObject(fullPath, stream);
+      this.debug('OPEN', 'finished upload');
+      this.OpenFiles.delete(state.fnum);
+      
+      return this.SFTPStream.status(state.reqid, STATUS_CODE.OK);
+    } catch(err) {
+      this.error('OPEN', err, 'error uploading object');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+  }
   protected async onOPEN(reqid: number, filename: string, flags: number) {
     this.debug('OPEN', null, { filename, flags, handleCount: this.HandleCount });
     if(filename.endsWith('\\') || filename.endsWith('/')) {
@@ -104,7 +132,7 @@ export default class SFTPSession {
     if (flags & OPEN_MODE.READ) {
       return await this.openRead(reqid, filename, flags, fullPath);
     } else if (flags & OPEN_MODE.WRITE) {
-      // TODO
+      return await this.openWrite(reqid, filename, flags, fullPath);
     } else {
       this.debug('OPEN', 'Unsupported operation');
       return this.SFTPStream.status(reqid, STATUS_CODE.OP_UNSUPPORTED);
@@ -157,9 +185,31 @@ export default class SFTPSession {
       return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
     }
   }
-  // protected onWRITE(reqid: number, handle: Buffer, offset: number, data: Buffer) {
-  //   this.debug('WRITE');
-  // }
+  protected onWRITE(reqid: number, handle: Buffer, offset: number, data: Buffer) {
+    if (handle.length !== 4) {
+      this.debug('WRITE', 'wrong handle length');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+
+    const handleId = handle.readUInt32BE(0);
+    this.debug('WRITE', null, { handleId, offset });
+
+    const state = this.OpenFiles.get(handleId);
+    if (!state || !(state.flags & OPEN_MODE.WRITE)) {
+      this.debug('WRITE', 'invalid flags');
+      return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+    }
+
+    const writeData = Buffer.from(data);
+    state.stream.write(writeData, (err) => {
+      if (err) {
+        this.error('WRITE', err, 'Error writing to stream');
+        return this.SFTPStream.status(reqid, STATUS_CODE.FAILURE);
+      }
+      this.debug('WRITE', `Wrote ${writeData.length} bytes to stream`);
+      this.SFTPStream.status(reqid, STATUS_CODE.OK);
+    });
+  }
   protected async onOPENDIR(reqid: number, path: string) {
     this.debug('OPENDIR', null, { path });
     const fullPath = this.getFullPath(path);
@@ -445,6 +495,17 @@ export default class SFTPSession {
       stream.on('error', reject);
       stream.on('end', () => resolve(Buffer.concat(chunks)));
     });
+  }
+  protected s3UploadObject(key: string, stream: PassThrough) {
+    const upload = new Upload({
+      client: this.S3Client,
+      params: {
+        Bucket: this.S3Bucket,
+        Key: key,
+        Body: stream
+      },
+    });
+    return upload.done();
   }
   protected getFullPath(filename: string) {
     const fullPath = join(this.ClientKey.path, normalize(filename));
