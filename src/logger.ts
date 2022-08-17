@@ -15,27 +15,15 @@ export type Callbacks = {
   onLogin?: (opts: { username: string }) => void;
   onDisconnect?: (opts: { username: string }) => void;
   onError?: (opts: { username?: string, msg: string, err?: Error }) => void;
-  onPut?: (opts: { username: string, path: string }) => void;
-  onGet?: (opts: { username: string, path: string }) => void;
-  onRm?: (opts: { username: string, path: string }) => void;
-  onRmdir?: (opts: { username: string, path: string }) => void;
-  onMkdir?: (opts: { username: string, path: string }) => void;
-  onRename?: (opts: { username: string, oldPath: string, newPath: string }) => void;
+  onPut?: (opts: { username?: string, path: string }) => void;
+  onGet?: (opts: { username?: string, path: string }) => void;
+  onRm?: (opts: { username?: string, path: string }) => void;
+  onRmdir?: (opts: { username?: string, path: string }) => void;
+  onMkdir?: (opts: { username?: string, path: string }) => void;
+  onRename?: (opts: { username?: string, oldPath: string, newPath: string }) => void;
 };
 type CallbackFunction = keyof Callbacks;
 type CallbackOpts<T extends CallbackFunction> = Parameters<Callbacks[T]>[0];
-type CallbackFunctionOptsReqUser = {
-  [K in CallbackFunction]: CallbackOpts<K> extends { username: string } ? K : never;
-}[CallbackFunction];
-type OptionalUsername<T extends { username: string }> = Omit<T, 'username'> & Partial<Pick<T, 'username'>>;
-type CallbackFunctionOptUser = {
-  [K in CallbackFunction]: K extends CallbackFunctionOptsReqUser ?
-    OptionalUsername<CallbackOpts<K>> : CallbackOpts<K>;
-};
-
-// type CaseStringKeys = {
-//   [K in keyof BaseCase]: BaseCase[K] extends string ? K : never; 
-// }[keyof BaseCase];
 
 export default class Logger {
   protected LogFunction?: LogFunction;
@@ -80,93 +68,42 @@ export default class Logger {
       err: opts.err
     });
   }
-  // protected onCallback<T extends CallbackFunction, P extends Parameters<Callbacks[T]>[0]>(name: T, opts: P) {
-  //   try {
-  //     // @ts-ignore
-  //     this.Callbacks?.[name]?.(opts);
-  //   } catch(err) {
-  //     this.error({ err, msg: `Error calling ${name}` });
-  //   }
-  // }
-  public onAddUser(opts: CallbackFunctionOptUser['onAddUser']) {
-    // this.onCallback('onAddUser', opts);
+  protected onCallback<T extends CallbackFunction, P extends Parameters<Callbacks[T]>[0]>(name: T, opts: P) {
     try {
-      this.Callbacks?.onAddUser?.({ ...opts, username: this.getUsername(opts) });
+      // @ts-ignore
+      this.Callbacks?.[name]?.(opts);
     } catch(err) {
-      this.error({ err, msg: 'Error calling onAddUser' });
+      this.error({ err, msg: `Error calling ${name}` });
     }
   }
-  public onLogin(opts: CallbackFunctionOptUser['onLogin']) {
-    // this.onCallback('onLogin', opts);
-    try {
-      this.Callbacks?.onLogin?.({ ...opts, username: this.getUsername(opts) });
-    } catch(err) {
-      this.error({ err, msg: 'Error calling onLogin' });
-    }
+  public onAddUser(opts: CallbackOpts<'onAddUser'>) {
+    this.onCallback('onAddUser', opts);
   }
-  public onDisconnect(opts: CallbackFunctionOptUser['onDisconnect']) {
-    // this.onCallback('onDisconnect', opts);
-    try {
-      this.Callbacks?.onDisconnect?.({ ...opts, username: this.getUsername(opts) });
-    } catch(err) {
-      this.error({ err, msg: 'Error calling onDisconnect' });
-    }
+  public onLogin(opts: CallbackOpts<'onLogin'>) {
+    this.onCallback('onLogin', opts);
   }
-  protected onError(opts: CallbackFunctionOptUser['onError']) {
-    // this.onCallback('onError', opts);
-    try {
-      this.Callbacks?.onError?.({ ...opts, username: this.getUsername(opts) });
-    } catch(err) {
-      this.error({ err, msg: 'Error calling onError' });
-    }
+  public onDisconnect(opts: CallbackOpts<'onDisconnect'>) {
+    this.onCallback('onDisconnect', opts);
   }
-  public onPut(opts: CallbackFunctionOptUser['onPut']) {
-    // this.onCallback('onPut', opts);
-    try {
-      this.Callbacks?.onPut?.({ ...opts, username: this.getUsername(opts) });
-    } catch(err) {
-      this.error({ err, msg: 'Error calling onPut' });
-    }
+  protected onError(opts: CallbackOpts<'onError'>) {
+    this.onCallback('onError', opts);
   }
-  public onGet(opts: CallbackFunctionOptUser['onGet']) {
-    // this.onCallback('onGet', opts);
-    console.log('here');
-    try {
-      this.Callbacks?.onGet?.({ ...opts, username: this.getUsername(opts) });
-    } catch(err) {
-      this.error({ err, msg: 'Error calling onGet' });
-    }
+  public onPut(opts: CallbackOpts<'onPut'>) {
+    this.onCallback('onPut', opts);
   }
-  public onRm(opts: CallbackFunctionOptUser['onRm']) {
-    // this.onCallback('onRm', opts);
-    try {
-      this.Callbacks?.onRm?.({ ...opts, username: this.getUsername(opts) });
-    } catch(err) {
-      this.error({ err, msg: 'Error calling onRm' });
-    }
+  public onGet(opts: CallbackOpts<'onGet'>) {
+    this.onCallback('onGet', opts);
   }
-  public onRmdir(opts: CallbackFunctionOptUser['onRmdir']) {
-    // this.onCallback('onRmdir', opts);
-    try {
-      this.Callbacks?.onRmdir?.({ ...opts, username: this.getUsername(opts) });
-    } catch(err) {
-      this.error({ err, msg: 'Error calling onRmdir' });
-    }
+  public onRm(opts: CallbackOpts<'onRm'>) {
+    this.onCallback('onRm', opts);
   }
-  public onMkdir(opts: CallbackFunctionOptUser['onMkdir']) {
-    // this.onCallback('onMkdir', opts);
-    try {
-      this.Callbacks?.onMkdir?.({ ...opts, username: this.getUsername(opts) });
-    } catch(err) {
-      this.error({ err, msg: 'Error calling onMkdir' });
-    }
+  public onRmdir(opts: CallbackOpts<'onRmdir'>) {
+    this.onCallback('onRmdir', opts);
   }
-  public onRename(opts: CallbackFunctionOptUser['onRename']) {
-    // this.onCallback('onRename', opts);
-    try {
-      this.Callbacks?.onRename?.({ ...opts, username: this.getUsername(opts) });
-    } catch(err) {
-      this.error({ err, msg: 'Error calling onRename' });
-    }
+  public onMkdir(opts: CallbackOpts<'onMkdir'>) {
+    this.onCallback('onMkdir', opts);
+  }
+  public onRename(opts: CallbackOpts<'onRename'>) {
+    this.onCallback('onRename', opts);
   }
 }
